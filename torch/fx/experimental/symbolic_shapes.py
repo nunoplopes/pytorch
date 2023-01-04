@@ -243,6 +243,22 @@ if HAS_SYMPY:
                     sympy.simplify(base / gcd), sympy.simplify(divisor / gcd)
                 )
 
+    class BitwiseAnd(sympy.Function):
+        nargs = (2,)
+        precedence = 20
+
+        def _sympystr(self, printer):
+            lhs_str = printer.parenthesize(self.args[0], self.precedence)
+            rhs_str = printer.parenthesize(self.args[1], self.precedence)
+            return f"{lhs_str} & {rhs_str}"
+
+        @classmethod
+        def eval(cls, x, y):
+            if x == 0 or y == 0:
+                return sympy.Integer(0)
+            if isinstance(x, sympy.Integer) and isinstance(y, sympy.Integer):
+                return x & y
+
 # Methods that have a `__foo__` as well as `__rfoo__`
 reflectable_magic_methods = {
     'add': lambda a, b: a + b,
@@ -887,6 +903,41 @@ class ShapeEnv(object):
                     div_replacements[atom] = base / divisor
             expr = expr.xreplace(div_replacements)
             expr = sympy.expand(expr)
+
+        for _ in range(5):
+            old_expr = expr
+            # a + const1 relop b + const2 -> a relop b + (const2-const1)
+            if isinstance(expr, sympy.Rel):
+                cl = get_const(expr.lhs)
+                cr = get_const(expr.rhs)
+                if cl and cr and cl != 0:
+                    expr = type(expr)(expr.lhs - cl, expr.rhs - cl)
+
+                if isinstance(expr.lhs, FloorDiv):
+                    # a // b == 0 -> and a >= 0 and a < b
+                    if isinstance(expr, sympy.Eq) and expr.rhs == 0:
+                        expr = (expr.lhs.args[0] >= 0 and
+                                expr.lhs.args[0] < expr.lhs.args[1])
+
+                    # a // b > c -> a >= (c+1) * b
+                    elif isinstance(expr, sympy.Gt) and isinstance(expr.rhs, sympy.Integer):
+                        expr = expr.lhs.args[0] >= (expr.rhs + 1) * expr.lhs.args[1]
+
+                    # a // b >= c -> a >= c * b
+                    elif isinstance(expr, sympy.Ge) and isinstance(expr.rhs, sympy.Integer):
+                        expr = expr.lhs.args[0] >= expr.rhs * expr.lhs.args[1]
+
+                # (x // 2) % 2 != 0 -> (x & 2) != 0
+                if (isinstance(expr, sympy.Eq) and
+                    expr.rhs == 0 and
+                    isinstance(expr.lhs, sympy.Mod) and
+                    expr.lhs.args[1] == 2 and
+                    isinstance(expr.lhs.args[0], FloorDiv) and
+                    expr.lhs.args[0].args[1] == 2):
+                    expr = sympy.Ne(BitwiseAnd(expr.lhs.args[0].args[0], sympy.Integer(2)), 0)
+
+            if old_expr == expr:
+                break
         return expr
 
     @lru_cache(256)
